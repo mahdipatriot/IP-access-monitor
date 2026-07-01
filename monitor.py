@@ -17,7 +17,9 @@ import logging
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Any, Callable
 
 from dotenv import load_dotenv
 
@@ -41,7 +43,7 @@ logger = logging.getLogger("monitor")
 #  Configuration                                                               #
 # --------------------------------------------------------------------------- #
 
-def load_config() -> dict[str, any]:
+def load_config() -> dict[str, Any]:
     load_dotenv()
     chat_ids_raw = os.getenv("TELEGRAM_CHAT_ID", "")
     chat_ids = [c.strip() for c in chat_ids_raw.split(",") if c.strip()]
@@ -67,7 +69,7 @@ def load_config() -> dict[str, any]:
     return config
 
 
-def load_ips(ips_file: Path = None) -> list[str]:
+def load_ips(ips_file: Path | None = None) -> list[str]:
     """Load IPs from ips.txt, ignoring comments and blank lines."""
     if ips_file is None:
         ips_file = Path(__file__).resolve().parent / "ips.txt"
@@ -95,14 +97,14 @@ def load_ips(ips_file: Path = None) -> list[str]:
 def make_status_provider(
     snooze: SnoozeManager,
     ips: list[str],
-) -> callable:
+) -> Callable[[str], str]:
     """Return a callable that produces a status text for the bot /status command."""
-    def _status() -> str:
+    def _status(chat_id: str) -> str:
         lines = ["<b>IP Access Monitor — Status</b>\n"]
         for ip in ips:
             cond = snooze.get_last_condition(ip) or "unknown"
             icon = {"ok": "✅", "down": "🔴", "iran_only": "🟡", "degraded": "🟠"}.get(cond, "❓")
-            snoozed = " (snoozed)" if snooze.is_snoozed(ip) else ""
+            snoozed = " (snoozed by you)" if snooze.is_snoozed(ip, chat_id) else ""
             lines.append(f"  {icon} <code>{ip}</code> — {cond}{snoozed}")
         return "\n".join(lines)
     return _status
@@ -111,6 +113,75 @@ def make_status_provider(
 # --------------------------------------------------------------------------- #
 #  Main monitoring loop                                                        #
 # --------------------------------------------------------------------------- #
+
+def _check_single_ip(
+    ip: str,
+    api: CheckHostAPI,
+    selected_nodes: list[str],
+    evaluator: ResultEvaluator,
+    telegram: TelegramAlert,
+    snooze: SnoozeManager,
+    result_wait: float,
+    snooze_minutes: int,
+) -> None:
+    """Check a single IP, evaluate, and send alerts if needed."""
+    try:
+        logger.info("Starting ping check for %s", ip)
+        response = api.start_ping_check(ip, nodes=selected_nodes)
+
+        if not response.get("ok"):
+            logger.error("check-ping failed for %s: %s", ip, response)
+            return
+
+        request_id = response["request_id"]
+        permanent_link = response.get("permanent_link", "")
+
+        # Poll until results are ready
+        results = api.poll_until_complete(
+            request_id,
+            wait=result_wait,
+            max_polls=6,
+        )
+
+        # Evaluate
+        ev = evaluator.evaluate(ip, results, permanent_link)
+
+        # Check for recovery (non-OK → OK)
+        last_cond = snooze.get_last_condition(ip)
+        if last_cond and last_cond != "ok" and ev.condition == Condition.OK:
+            telegram.alert_recovery(ip, len(ev.ok_nodes), ev.total_nodes)
+            logger.info("Recovery detected for %s — cleared all snoozes", ip)
+
+        # Update last condition
+        snooze.set_last_condition(ip, ev.condition.value)
+
+        # Alert based on condition (telegram handles per-user snooze skipping)
+        if ev.condition == Condition.DOWN:
+            telegram.alert_down(ip, ev.total_nodes, permanent_link, snooze_minutes)
+        elif ev.condition == Condition.IRAN_ONLY:
+            telegram.alert_iran_only(
+                ip,
+                ev.iran_ok,
+                ev.global_failed,
+                permanent_link,
+                snooze_minutes,
+            )
+        elif ev.condition == Condition.DEGRADED:
+            telegram.alert_degraded(
+                ip,
+                len(ev.ok_nodes),
+                ev.total_nodes,
+                ev.ok_pct,
+                permanent_link,
+                snooze_minutes,
+            )
+        # Condition.OK → no alert (recovery already handled above)
+
+    except CheckHostError as exc:
+        logger.error("API error for %s: %s", ip, exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Unexpected error checking %s: %s", ip, exc)
+
 
 def run_cycle(
     ips: list[str],
@@ -122,7 +193,7 @@ def run_cycle(
     result_wait: float,
     snooze_minutes: int,
 ) -> None:
-    """Run a single monitoring cycle: check all IPs, evaluate, alert."""
+    """Run a single monitoring cycle: check all IPs in parallel, evaluate, alert."""
 
     # Select nodes once for the whole cycle
     selected_nodes = node_manager.select_nodes()
@@ -133,69 +204,32 @@ def run_cycle(
     # Clean up expired snoozes
     snooze.cleanup()
 
-    for ip in ips:
-        try:
-            logger.info("Starting ping check for %s", ip)
-            response = api.start_ping_check(ip, nodes=selected_nodes)
+    # Check all IPs in parallel (max 10 concurrent)
+    max_workers = min(len(ips), 10)
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="ip-check") as executor:
+        futures = {
+            executor.submit(
+                _check_single_ip,
+                ip,
+                api,
+                selected_nodes,
+                evaluator,
+                telegram,
+                snooze,
+                result_wait,
+                snooze_minutes,
+            ): ip
+            for ip in ips
+        }
+        for future in as_completed(futures):
+            ip = futures[future]
+            try:
+                future.result()
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("IP check failed for %s: %s", ip, exc)
 
-            if not response.get("ok"):
-                logger.error("check-ping failed for %s: %s", ip, response)
-                continue
-
-            request_id = response["request_id"]
-            permanent_link = response.get("permanent_link", "")
-
-            # Poll until results are ready
-            results = api.poll_until_complete(
-                request_id,
-                wait=result_wait,
-                max_polls=6,
-            )
-
-            # Evaluate
-            ev = evaluator.evaluate(ip, results, permanent_link)
-
-            # Check for recovery (non-OK → OK)
-            last_cond = snooze.get_last_condition(ip)
-            if last_cond and last_cond != "ok" and ev.condition == Condition.OK:
-                telegram.alert_recovery(ip, len(ev.ok_nodes), ev.total_nodes)
-                snooze.unsnooze(ip)
-                logger.info("Recovery detected for %s — cleared snooze", ip)
-
-            # Update last condition
-            snooze.set_last_condition(ip, ev.condition.value)
-
-            # Skip alerts if snoozed
-            if snooze.is_snoozed(ip):
-                logger.info("%s is snoozed — skipping alert (condition: %s)", ip, ev.condition.value)
-                continue
-
-            # Alert based on condition
-            if ev.condition == Condition.DOWN:
-                telegram.alert_down(ip, ev.total_nodes, permanent_link, snooze_minutes)
-            elif ev.condition == Condition.IRAN_ONLY:
-                telegram.alert_iran_only(
-                    ip,
-                    ev.iran_ok,
-                    ev.global_failed,
-                    permanent_link,
-                    snooze_minutes,
-                )
-            elif ev.condition == Condition.DEGRADED:
-                telegram.alert_degraded(
-                    ip,
-                    len(ev.ok_nodes),
-                    ev.total_nodes,
-                    ev.ok_pct,
-                    permanent_link,
-                    snooze_minutes,
-                )
-            # Condition.OK → no alert (recovery already handled above)
-
-        except CheckHostError as exc:
-            logger.error("API error for %s: %s", ip, exc)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Unexpected error checking %s: %s", ip, exc)
+    # Save snooze state once at end of cycle (batch save)
+    snooze.save()
 
 
 # --------------------------------------------------------------------------- #
@@ -203,14 +237,14 @@ def run_cycle(
 # --------------------------------------------------------------------------- #
 
 def handle_cli_snooze(snooze: SnoozeManager, ip: str, minutes: int) -> None:
-    snooze.snooze(ip, minutes)
-    print(f"✅ Snoozed {ip} for {minutes} min")
+    snooze.snooze(ip, minutes, chat_id="cli")
+    print(f"✅ Snoozed {ip} for {minutes} min (all CLI users)")
     sys.exit(0)
 
 
 def handle_cli_unsnooze(snooze: SnoozeManager, ip: str) -> None:
-    snooze.unsnooze(ip)
-    print(f"✅ Removed snooze for {ip}")
+    snooze.unsnooze_all(ip)
+    print(f"✅ Removed snooze for {ip} (all users)")
     sys.exit(0)
 
 
@@ -219,7 +253,7 @@ def handle_cli_status(snooze: SnoozeManager, ips: list[str]) -> None:
     for ip in ips:
         cond = snooze.get_last_condition(ip) or "unknown"
         icon = {"ok": "✅", "down": "🔴", "iran_only": "🟡", "degraded": "🟠"}.get(cond, "❓")
-        snoozed = " (snoozed)" if snooze.is_snoozed(ip) else ""
+        snoozed = " (snoozed by someone)" if snooze.is_snoozed_any(ip) else ""
         print(f"  {icon} {ip} — {cond}{snoozed}")
     sys.exit(0)
 
@@ -234,7 +268,7 @@ def main() -> None:
     parser.add_argument("--snooze", metavar="IP", help="Snooze alerts for an IP")
     parser.add_argument("--unsnooze", metavar="IP", help="Remove snooze for an IP")
     parser.add_argument("--status", action="store_true", help="Show current status and exit")
-    snooze_min_arg = parser.add_argument("--minutes", type=int, default=60, help="Snooze duration in minutes (default 60)")
+    parser.add_argument("--minutes", type=int, default=60, help="Snooze duration in minutes (default 60)")
     args = parser.parse_args()
 
     config = load_config()
@@ -269,6 +303,7 @@ def main() -> None:
     telegram = TelegramAlert(
         bot_token=config["telegram_bot_token"],
         chat_ids=config["telegram_chat_ids"],
+        snooze=snooze,
     )
 
     # Start Telegram bot (commands + ack button callbacks)
@@ -294,6 +329,7 @@ def main() -> None:
             ips, api, node_manager, evaluator, telegram, snooze,
             config["result_wait"], config["snooze_minutes"],
         )
+        bot.stop()
         return
 
     while True:

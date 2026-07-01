@@ -137,10 +137,10 @@ class TelegramBot:
         ip = parts[1]
         minutes = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 30
 
-        self.snooze.snooze(ip, minutes)
+        self.snooze.snooze(ip, minutes, chat_id)
         self._api_call("answerCallbackQuery", {
             "callback_query_id": query_id,
-            "text": f"Snoozed {ip} for {minutes} min",
+            "text": f"Snoozed {ip} for {minutes} min (for you only)",
         })
 
         msg_chat_id = str(callback.get("message", {}).get("chat", {}).get("id", chat_id))
@@ -182,9 +182,9 @@ class TelegramBot:
         handler = self._get_command_handler(command)
 
         if handler:
-            reply = handler(args)
+            reply = handler(args, chat_id)
         else:
-            reply = self._cmd_help([])
+            reply = self._cmd_help([], chat_id)
 
         self._api_call("sendMessage", {
             "chat_id": chat_id,
@@ -207,36 +207,36 @@ class TelegramBot:
     #  Command handlers                                                   #
     # ------------------------------------------------------------------ #
 
-    def _cmd_snooze(self, args: list[str]) -> str:
+    def _cmd_snooze(self, args: list[str], chat_id: str) -> str:
         if not args:
             return "Usage: /snooze &lt;IP&gt; [minutes]\nExample: /snooze 1.2.3.4 60"
         ip = args[0]
         minutes = int(args[1]) if len(args) > 1 and args[1].isdigit() else 60
-        self.snooze.snooze(ip, minutes)
-        return f"Snoozed <code>{ip}</code> for {minutes} min."
+        self.snooze.snooze(ip, minutes, chat_id)
+        return f"Snoozed <code>{ip}</code> for {minutes} min (for you only)."
 
-    def _cmd_unsnooze(self, args: list[str]) -> str:
+    def _cmd_unsnooze(self, args: list[str], chat_id: str) -> str:
         if not args:
             return "Usage: /unsnooze &lt;IP&gt;\nExample: /unsnooze 1.2.3.4"
         ip = args[0]
-        self.snooze.unsnooze(ip)
+        self.snooze.unsnooze(ip, chat_id)
         return f"Removed snooze for <code>{ip}</code>."
 
-    def _cmd_status(self, args: list[str]) -> str:
+    def _cmd_status(self, args: list[str], chat_id: str) -> str:
         if self.status_provider:
-            return self.status_provider()
+            return self.status_provider(chat_id)
         return "Status not available."
 
-    def _cmd_list(self, args: list[str]) -> str:
-        snoozed = self.snooze.get_snoozed_list()
+    def _cmd_list(self, args: list[str], chat_id: str) -> str:
+        snoozed = self.snooze.get_snoozed_list(chat_id)
         if not snoozed:
-            return "No IPs are currently snoozed."
-        lines = ["<b>Snoozed IPs:</b>"]
+            return "No IPs are currently snoozed (by you)."
+        lines = ["<b>Your snoozed IPs:</b>"]
         for item in snoozed:
             lines.append(f"  - <code>{item['ip']}</code> - {item['remaining_min']} min remaining")
         return "\n".join(lines)
 
-    def _cmd_help(self, args: list[str]) -> str:
+    def _cmd_help(self, args: list[str], chat_id: str) -> str:
         return (
             "<b>IP Access Monitor - Commands</b>\n\n"
             "/snooze &lt;IP&gt; [minutes] - Snooze alerts for an IP (default 60 min)\n"

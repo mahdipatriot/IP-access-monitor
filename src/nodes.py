@@ -7,7 +7,6 @@ a set of nodes that always includes **all** nodes from priority countries
 
 import json
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Any

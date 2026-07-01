@@ -53,6 +53,7 @@ class ResultEvaluator:
         self.node_manager = node_manager
         self.threshold = threshold
         self.priority_countries = priority_countries or {"ir", "de"}
+        self._country_cache: dict[str, str] = {}
 
     def evaluate(
         self,
@@ -152,7 +153,9 @@ class ResultEvaluator:
         return False
 
     def _node_country(self, node_id: str) -> str:
+        if node_id in self._country_cache:
+            return self._country_cache[node_id]
         info = self.node_manager.get_node_info(node_id)
-        if info:
-            return NodeManager._country_code(info)
-        return ""
+        country = NodeManager._country_code(info) if info else ""
+        self._country_cache[node_id] = country
+        return country

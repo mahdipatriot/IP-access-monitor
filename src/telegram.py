@@ -1,7 +1,7 @@
 """Telegram Bot API alert sender.
 
-Supports multiple chat IDs and inline keyboard buttons for acknowledge-based
-snoozing.
+Supports multiple chat IDs, per-user snooze skipping, and inline keyboard
+buttons for acknowledge-based snoozing.
 """
 
 import logging
@@ -9,45 +9,59 @@ from typing import Any
 
 import requests
 
+from .snooze import SnoozeManager
+
 logger = logging.getLogger(__name__)
 
 TELEGRAM_API_BASE = "https://api.telegram.org"
 
-ACK_KEYBOARD: dict[str, Any] = {
-    "inline_keyboard": [[
-        {"text": "\U0001F507 Acknowledge (30 min)", "callback_data": "ack"},
-    ]],
-}
-
 
 class TelegramAlert:
-    """Sends alert messages via the Telegram Bot API to multiple recipients."""
+    """Sends alert messages via the Telegram Bot API to multiple recipients.
 
-    def __init__(self, bot_token: str, chat_ids: list[str], timeout: int = 15) -> None:
+    When a ``SnoozeManager`` is provided, alert methods skip recipients who
+    have snoozed the IP in question.  Recovery alerts are always sent to all
+    recipients.
+    """
+
+    def __init__(
+        self,
+        bot_token: str,
+        chat_ids: list[str],
+        snooze: SnoozeManager | None = None,
+        timeout: int = 15,
+    ) -> None:
         self.bot_token = bot_token
         self.chat_ids = chat_ids
+        self.snooze = snooze
         self.timeout = timeout
+        self._session = requests.Session()
 
     @property
     def _base_url(self) -> str:
         return f"{TELEGRAM_API_BASE}/bot{self.bot_token}"
+
+    # ------------------------------------------------------------------ #
+    #  Core send (no snooze filtering — used for test, bot replies)       #
+    # ------------------------------------------------------------------ #
 
     def send_message(
         self,
         text: str,
         parse_mode: str = "HTML",
         reply_markup: dict[str, Any] | None = None,
+        chat_id: str | None = None,
     ) -> bool:
-        """Send a message to all configured chat IDs.
+        """Send a message to all (or one) chat ID(s).
 
         Returns ``True`` if at least one delivery succeeded.
         """
-        url = f"{self._base_url}/sendMessage"
+        targets = [chat_id] if chat_id else self.chat_ids
         all_ok = True
 
-        for chat_id in self.chat_ids:
+        for cid in targets:
             payload: dict[str, Any] = {
-                "chat_id": chat_id,
+                "chat_id": cid,
                 "text": text,
                 "parse_mode": parse_mode,
                 "disable_web_page_preview": True,
@@ -55,19 +69,23 @@ class TelegramAlert:
             if reply_markup:
                 payload["reply_markup"] = reply_markup
             try:
-                resp = requests.post(url, json=payload, timeout=self.timeout)
+                resp = self._session.post(
+                    f"{self._base_url}/sendMessage",
+                    json=payload,
+                    timeout=self.timeout,
+                )
                 if resp.status_code == 200:
-                    logger.debug("Telegram message sent to %s (%d chars)", chat_id, len(text))
+                    logger.debug("Telegram message sent to %s (%d chars)", cid, len(text))
                 else:
                     logger.error(
                         "Telegram API error %d for chat %s: %s",
                         resp.status_code,
-                        chat_id,
+                        cid,
                         resp.text[:200],
                     )
                     all_ok = False
             except requests.RequestException as exc:
-                logger.error("Failed to send Telegram message to %s: %s", chat_id, exc)
+                logger.error("Failed to send Telegram message to %s: %s", cid, exc)
                 all_ok = False
 
         return all_ok
@@ -77,6 +95,57 @@ class TelegramAlert:
         return self.send_message(
             "✅ <b>IP Access Monitor</b>\nTest message — alerts are configured correctly."
         )
+
+    # ------------------------------------------------------------------ #
+    #  Alert send (with per-user snooze skipping)                         #
+    # ------------------------------------------------------------------ #
+
+    def _send_alert(
+        self,
+        ip: str,
+        text: str,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> bool:
+        """Send an alert to all chat IDs, skipping users who snoozed *ip*."""
+        all_ok = True
+        sent_count = 0
+
+        for cid in self.chat_ids:
+            if self.snooze and self.snooze.is_snoozed(ip, cid):
+                logger.debug("Skipping alert for %s — snoozed by %s", ip, cid)
+                continue
+
+            payload: dict[str, Any] = {
+                "chat_id": cid,
+                "text": text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            }
+            if reply_markup:
+                payload["reply_markup"] = reply_markup
+            try:
+                resp = self._session.post(
+                    f"{self._base_url}/sendMessage",
+                    json=payload,
+                    timeout=self.timeout,
+                )
+                if resp.status_code == 200:
+                    sent_count += 1
+                    logger.debug("Alert sent to %s for %s", cid, ip)
+                else:
+                    logger.error(
+                        "Telegram API error %d for chat %s: %s",
+                        resp.status_code,
+                        cid,
+                        resp.text[:200],
+                    )
+                    all_ok = False
+            except requests.RequestException as exc:
+                logger.error("Failed to send alert to %s: %s", cid, exc)
+                all_ok = False
+
+        logger.info("Alert for %s sent to %d/%d recipients", ip, sent_count, len(self.chat_ids))
+        return all_ok
 
     # ------------------------------------------------------------------ #
     #  Pre-formatted alert helpers (with inline ack button)               #
@@ -96,7 +165,7 @@ class TelegramAlert:
             f'\n<a href="{permanent_link}">View full report</a>'
         )
         keyboard = self._ack_keyboard(ip, snooze_minutes)
-        return self.send_message(msg, reply_markup=keyboard)
+        return self._send_alert(ip, msg, reply_markup=keyboard)
 
     def alert_iran_only(
         self,
@@ -115,7 +184,7 @@ class TelegramAlert:
             f'\n<a href="{permanent_link}">View full report</a>'
         )
         keyboard = self._ack_keyboard(ip, snooze_minutes)
-        return self.send_message(msg, reply_markup=keyboard)
+        return self._send_alert(ip, msg, reply_markup=keyboard)
 
     def alert_degraded(
         self,
@@ -132,7 +201,7 @@ class TelegramAlert:
             f'\n<a href="{permanent_link}">View full report</a>'
         )
         keyboard = self._ack_keyboard(ip, snooze_minutes)
-        return self.send_message(msg, reply_markup=keyboard)
+        return self._send_alert(ip, msg, reply_markup=keyboard)
 
     def alert_recovery(
         self,
@@ -140,11 +209,15 @@ class TelegramAlert:
         ok_count: int,
         total_count: int,
     ) -> bool:
+        """Send recovery to ALL users (ignores snooze) and clear all snoozes."""
         msg = (
             f"\u2705 <b>RECOVERED</b>: <code>{ip}</code>\n"
             f"Back online — <b>{ok_count}/{total_count}</b> nodes can ping now."
         )
-        return self.send_message(msg)
+        result = self.send_message(msg)  # send_message = no snooze filtering
+        if self.snooze:
+            self.snooze.unsnooze_all(ip)
+        return result
 
     # ------------------------------------------------------------------ #
     #  Helpers                                                            #
