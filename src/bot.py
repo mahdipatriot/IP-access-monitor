@@ -18,8 +18,8 @@ from .snooze import SnoozeManager
 logger = logging.getLogger(__name__)
 
 TELEGRAM_API_BASE = "https://api.telegram.org"
-LONG_POLL_TIMEOUT = 30  # seconds for getUpdates
-API_TIMEOUT = 15  # seconds for regular API calls (sendMessage, etc.)
+LONG_POLL_TIMEOUT = 3  # short for fast response
+API_TIMEOUT = 10  # seconds for regular API calls
 
 
 class TelegramBot:
@@ -35,10 +35,11 @@ class TelegramBot:
         self.bot_token = bot_token
         self.authorized_chat_ids = set(authorized_chat_ids)
         self.snooze = snooze_manager
-        self.status_provider = status_provider  # callable returning status text
+        self.status_provider = status_provider
         self._offset = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._session = requests.Session()
 
     @property
     def _base_url(self) -> str:
@@ -51,9 +52,12 @@ class TelegramBot:
         timeout: int | None = None,
     ) -> dict[str, Any] | None:
         url = f"{self._base_url}/{method}"
+        t0 = time.time()
         try:
-            resp = requests.post(url, json=payload, timeout=timeout or API_TIMEOUT)
+            resp = self._session.post(url, json=payload, timeout=timeout or API_TIMEOUT)
+            elapsed = time.time() - t0
             if resp.status_code == 200:
+                logger.debug("Bot API %s OK (%.1fs)", method, elapsed)
                 return resp.json()
             logger.error("Bot API error %d for %s: %s", resp.status_code, method, resp.text[:200])
         except requests.RequestException as exc:
@@ -66,9 +70,8 @@ class TelegramBot:
 
     def start(self) -> None:
         """Start the bot polling thread."""
-        # Clear any existing webhook so getUpdates works
         logger.info("Clearing any existing Telegram webhook...")
-        self._api_call("deleteWebhook", {"drop_pending_updates": False})
+        self._api_call("deleteWebhook", {"drop_pending_updates": True})
 
         self._thread = threading.Thread(target=self._run, daemon=True, name="telegram-bot")
         self._thread.start()
@@ -84,19 +87,20 @@ class TelegramBot:
                 self._poll_updates()
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Bot polling error: %s", exc)
-                time.sleep(5)
+                time.sleep(2)
 
     def _poll_updates(self) -> None:
         result = self._api_call("getUpdates", {
             "offset": self._offset,
             "timeout": LONG_POLL_TIMEOUT,
             "allowed_updates": ["message", "callback_query"],
-        }, timeout=LONG_POLL_TIMEOUT + 10)
+        }, timeout=LONG_POLL_TIMEOUT + 5)
 
         if not result or not result.get("ok"):
             return
 
-        for update in result.get("result", []):
+        updates = result.get("result", [])
+        for update in updates:
             self._offset = update["update_id"] + 1
 
             if "callback_query" in update:
@@ -139,7 +143,6 @@ class TelegramBot:
             "text": f"Snoozed {ip} for {minutes} min",
         })
 
-        # Also send a message to the chat
         msg_chat_id = str(callback.get("message", {}).get("chat", {}).get("id", chat_id))
         self._api_call("sendMessage", {
             "chat_id": msg_chat_id,
@@ -160,11 +163,10 @@ class TelegramBot:
             return
 
         text = text.strip()
-
-        logger.debug("Received message from chat_id=%s: %r", chat_id, text)
+        logger.info("Bot: message from %s: %r", chat_id, text)
 
         if chat_id not in self.authorized_chat_ids:
-            logger.debug("Chat %s not authorized (authorized: %s)", chat_id, self.authorized_chat_ids)
+            logger.debug("Bot: chat %s not in authorized %s", chat_id, self.authorized_chat_ids)
             return
 
         if not text.startswith("/"):
@@ -172,11 +174,10 @@ class TelegramBot:
 
         parts = text.split()
         raw_cmd = parts[0]
-        # Strip bot mention suffix (e.g. "/help@my_bot" → "/help")
         command = raw_cmd.lower().split("@")[0]
         args = parts[1:]
 
-        logger.debug("Parsed command: %r, args: %r", command, args)
+        logger.info("Bot: command=%r args=%r", command, args)
 
         handler = self._get_command_handler(command)
 
