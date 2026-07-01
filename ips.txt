@@ -1,0 +1,4 @@
+# Add one IP or hostname per line (lines starting with # are ignored)
+# Examples:
+# 1.2.3.4
+# example.com
