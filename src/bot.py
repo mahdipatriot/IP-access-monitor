@@ -3,7 +3,7 @@
 Runs a background thread that polls Telegram ``getUpdates`` (long polling)
 and handles:
   - Inline callback queries (acknowledge button on alerts)
-  - Bot commands: /snooze, /unsnooze, /status, /list, /help
+  - Bot commands: /start, /snooze, /unsnooze, /status, /list, /help
 """
 
 import logging
@@ -18,7 +18,8 @@ from .snooze import SnoozeManager
 logger = logging.getLogger(__name__)
 
 TELEGRAM_API_BASE = "https://api.telegram.org"
-LONG_POLL_TIMEOUT = 30  # seconds
+LONG_POLL_TIMEOUT = 30  # seconds for getUpdates
+API_TIMEOUT = 15  # seconds for regular API calls (sendMessage, etc.)
 
 
 class TelegramBot:
@@ -43,10 +44,15 @@ class TelegramBot:
     def _base_url(self) -> str:
         return f"{TELEGRAM_API_BASE}/bot{self.bot_token}"
 
-    def _api_call(self, method: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    def _api_call(
+        self,
+        method: str,
+        payload: dict[str, Any],
+        timeout: int | None = None,
+    ) -> dict[str, Any] | None:
         url = f"{self._base_url}/{method}"
         try:
-            resp = requests.post(url, json=payload, timeout=LONG_POLL_TIMEOUT + 10)
+            resp = requests.post(url, json=payload, timeout=timeout or API_TIMEOUT)
             if resp.status_code == 200:
                 return resp.json()
             logger.error("Bot API error %d for %s: %s", resp.status_code, method, resp.text[:200])
@@ -60,6 +66,10 @@ class TelegramBot:
 
     def start(self) -> None:
         """Start the bot polling thread."""
+        # Clear any existing webhook so getUpdates works
+        logger.info("Clearing any existing Telegram webhook...")
+        self._api_call("deleteWebhook", {"drop_pending_updates": False})
+
         self._thread = threading.Thread(target=self._run, daemon=True, name="telegram-bot")
         self._thread.start()
         logger.info("Telegram bot thread started — listening for commands")
@@ -81,7 +91,8 @@ class TelegramBot:
             "offset": self._offset,
             "timeout": LONG_POLL_TIMEOUT,
             "allowed_updates": ["message", "callback_query"],
-        })
+        }, timeout=LONG_POLL_TIMEOUT + 10)
+
         if not result or not result.get("ok"):
             return
 
@@ -106,7 +117,7 @@ class TelegramBot:
         if chat_id not in self.authorized_chat_ids:
             self._api_call("answerCallbackQuery", {
                 "callback_query_id": query_id,
-                "text": "⛔ Not authorized",
+                "text": "Not authorized",
             })
             return
 
@@ -125,14 +136,14 @@ class TelegramBot:
         self.snooze.snooze(ip, minutes)
         self._api_call("answerCallbackQuery", {
             "callback_query_id": query_id,
-            "text": f"✅ Snoozed {ip} for {minutes} min",
+            "text": f"Snoozed {ip} for {minutes} min",
         })
 
         # Also send a message to the chat
         msg_chat_id = str(callback.get("message", {}).get("chat", {}).get("id", chat_id))
         self._api_call("sendMessage", {
             "chat_id": msg_chat_id,
-            "text": f"✅ Alerts for <code>{ip}</code> snoozed for {minutes} min.\n"
+            "text": f"Alerts for <code>{ip}</code> snoozed for {minutes} min.\n"
                     f"Use /unsnooze {ip} to cancel early.",
             "parse_mode": "HTML",
         })
@@ -143,30 +154,36 @@ class TelegramBot:
 
     def _handle_message(self, message: dict[str, Any]) -> None:
         chat_id = str(message.get("chat", {}).get("id", ""))
-        text = message.get("text", "").strip()
+        text = message.get("text")
+
+        if text is None:
+            return
+
+        text = text.strip()
+
+        logger.debug("Received message from chat_id=%s: %r", chat_id, text)
 
         if chat_id not in self.authorized_chat_ids:
+            logger.debug("Chat %s not authorized (authorized: %s)", chat_id, self.authorized_chat_ids)
             return
 
         if not text.startswith("/"):
             return
 
         parts = text.split()
-        command = parts[0].lower().split("@")[0]  # strip bot mention suffix
+        raw_cmd = parts[0]
+        # Strip bot mention suffix (e.g. "/help@my_bot" → "/help")
+        command = raw_cmd.lower().split("@")[0]
         args = parts[1:]
 
-        handler = {
-            "/snooze": self._cmd_snooze,
-            "/unsnooze": self._cmd_unsnooze,
-            "/status": self._cmd_status,
-            "/list": self._cmd_list,
-            "/help": self._cmd_help,
-        }.get(command)
+        logger.debug("Parsed command: %r, args: %r", command, args)
+
+        handler = self._get_command_handler(command)
 
         if handler:
             reply = handler(args)
         else:
-            reply = "Unknown command. Send /help for available commands."
+            reply = self._cmd_help([])
 
         self._api_call("sendMessage", {
             "chat_id": chat_id,
@@ -174,24 +191,35 @@ class TelegramBot:
             "parse_mode": "HTML",
         })
 
+    def _get_command_handler(self, command: str):
+        handlers = {
+            "/start": self._cmd_help,
+            "/snooze": self._cmd_snooze,
+            "/unsnooze": self._cmd_unsnooze,
+            "/status": self._cmd_status,
+            "/list": self._cmd_list,
+            "/help": self._cmd_help,
+        }
+        return handlers.get(command)
+
     # ------------------------------------------------------------------ #
     #  Command handlers                                                   #
     # ------------------------------------------------------------------ #
 
     def _cmd_snooze(self, args: list[str]) -> str:
         if not args:
-            return "Usage: /snooze <IP> [minutes]\nExample: /snooze 1.2.3.4 60"
+            return "Usage: /snooze &lt;IP&gt; [minutes]\nExample: /snooze 1.2.3.4 60"
         ip = args[0]
         minutes = int(args[1]) if len(args) > 1 and args[1].isdigit() else 60
         self.snooze.snooze(ip, minutes)
-        return f"✅ Snoozed <code>{ip}</code> for {minutes} min."
+        return f"Snoozed <code>{ip}</code> for {minutes} min."
 
     def _cmd_unsnooze(self, args: list[str]) -> str:
         if not args:
-            return "Usage: /unsnooze <IP>\nExample: /unsnooze 1.2.3.4"
+            return "Usage: /unsnooze &lt;IP&gt;\nExample: /unsnooze 1.2.3.4"
         ip = args[0]
         self.snooze.unsnooze(ip)
-        return f"✅ Removed snooze for <code>{ip}</code>."
+        return f"Removed snooze for <code>{ip}</code>."
 
     def _cmd_status(self, args: list[str]) -> str:
         if self.status_provider:
@@ -204,16 +232,16 @@ class TelegramBot:
             return "No IPs are currently snoozed."
         lines = ["<b>Snoozed IPs:</b>"]
         for item in snoozed:
-            lines.append(f"  • <code>{item['ip']}</code> — {item['remaining_min']} min remaining")
+            lines.append(f"  - <code>{item['ip']}</code> - {item['remaining_min']} min remaining")
         return "\n".join(lines)
 
     def _cmd_help(self, args: list[str]) -> str:
         return (
-            "<b>IP Access Monitor — Commands</b>\n\n"
-            "/snooze &lt;IP&gt; [minutes] — Snooze alerts for an IP (default 60 min)\n"
-            "/unsnooze &lt;IP&gt; — Remove snooze for an IP\n"
-            "/status — Show all monitored IPs and their last condition\n"
-            "/list — Show currently snoozed IPs\n"
-            "/help — Show this help message\n\n"
+            "<b>IP Access Monitor - Commands</b>\n\n"
+            "/snooze &lt;IP&gt; [minutes] - Snooze alerts for an IP (default 60 min)\n"
+            "/unsnooze &lt;IP&gt; - Remove snooze for an IP\n"
+            "/status - Show all monitored IPs and their last condition\n"
+            "/list - Show currently snoozed IPs\n"
+            "/help - Show this help message\n\n"
             "You can also tap the Acknowledge button on any alert to snooze for 30 min."
         )
