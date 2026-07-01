@@ -6,11 +6,14 @@ Monitor IP reachability worldwide using the [check-host.net](https://check-host.
 
 - **Multi-node ping checks** via check-host.net's global network
 - **Iran + Germany priority** — all nodes from these countries are always included
+- **Multiple Telegram recipients** — send alerts to several chat IDs
+- **Acknowledge button** — tap to snooze an IP for 30 min directly from Telegram
+- **Bot commands** — `/snooze`, `/unsnooze`, `/status`, `/list`, `/help`
 - **Three alert conditions**:
   - 🔴 **DOWN** — no location can ping the IP
   - 🟡 **Iran-only** — only Iranian nodes can reach the IP
   - 🟠 **Degraded** — partial reachability below the threshold
-- **Telegram notifications** with direct links to full reports
+- ✅ **Recovery alerts** — automatic notification when an IP comes back online
 - **Rate-limit friendly** — exponential backoff, smart polling, configurable intervals
 - **systemd service** — runs 24/7 with auto-restart
 - **Interactive installer** — guided setup in under a minute
@@ -31,7 +34,7 @@ nano ips.txt
 ```
 
 The installer will:
-1. Prompt for your Telegram bot token and chat ID (with a test message)
+1. Prompt for your Telegram bot token and chat ID(s) (with test messages)
 2. Configure monitoring parameters
 3. Install Python dependencies
 4. Create and start a systemd service
@@ -49,7 +52,7 @@ The installer will:
 ```bash
 # 1. Copy and edit the environment file
 cp .env.example .env
-nano .env  # fill in your Telegram token and chat ID
+nano .env  # fill in your Telegram token and chat ID(s)
 
 # 2. Add IPs to monitor
 nano ips.txt
@@ -76,12 +79,13 @@ chmod +x run.sh
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `TELEGRAM_BOT_TOKEN` | — | Telegram bot token from @BotFather |
-| `TELEGRAM_CHAT_ID` | — | Telegram chat ID to send alerts to |
+| `TELEGRAM_CHAT_ID` | — | Comma-separated chat IDs (e.g. `id1,id2,id3`) |
 | `CHECK_INTERVAL` | `120` | Seconds between full check cycles |
 | `RESULT_WAIT` | `5` | Seconds to wait before polling results |
 | `NODE_CACHE_TTL` | `86400` | Node list cache TTL in seconds (24h) |
 | `MAX_NODES` | `20` | Max non-priority global nodes to use |
 | `ALERT_THRESHOLD` | `0.7` | Fraction of nodes that must be OK (0.7 = 70%) |
+| `SNOOZE_MINUTES` | `30` | Default snooze duration for ack button |
 | `PRIORITY_COUNTRIES` | `ir,de` | Countries whose nodes are always included |
 
 ### IP List (`ips.txt`)
@@ -110,7 +114,13 @@ example.com
                     │  │ evaluator  │  │  → DOWN / IRAN_ONLY / DEGRADED / OK
                     │  └────────────┘  │
                     │  ┌────────────┐  │
-                    │  │ telegram   │──┼──▶  Telegram alerts
+                    │  │ snooze.py  │  │  → skip alert if snoozed
+                    │  └────────────┘  │
+                    │  ┌────────────┐  │
+                    │  │ telegram   │──┼──▶  Telegram alerts (with ack button)
+                    │  └────────────┘  │
+                    │  ┌────────────┐  │
+                    │  │ bot.py     │◀─┼──▶  Telegram commands (/snooze, /status...)
                     │  └────────────┘  │
                     └──────────────────┘
 ```
@@ -126,10 +136,43 @@ example.com
 
 | Condition | Criteria | Alert |
 |-----------|----------|-------|
-| 🔴 **DOWN** | 0 nodes have OK ping | Yes |
-| 🟡 **Iran-only** | Only Iranian nodes OK, all others (incl. Germany) fail | Yes |
-| 🟠 **Degraded** | Some nodes OK but below threshold (<70%) | Yes |
-| ✅ **OK** | ≥70% of nodes have OK ping | No |
+| 🔴 **DOWN** | 0 nodes have OK ping | Yes (with ack button) |
+| 🟡 **Iran-only** | Only Iranian nodes OK, all others (incl. Germany) fail | Yes (with ack button) |
+| 🟠 **Degraded** | Some nodes OK but below threshold (<70%) | Yes (with ack button) |
+| ✅ **OK** | ≥70% of nodes have OK ping | No (recovery alert if was non-OK) |
+
+### Snooze System
+
+Alerts fire **every cycle** until you acknowledge them. No auto-snooze — you stay notified.
+
+**Via Telegram inline button:**
+- Every alert includes a "🔇 Acknowledge (30 min)" button
+- Tap it to snooze that IP for 30 minutes
+- After 30 min, if the condition persists, alerts resume automatically
+
+**Via Telegram bot commands:**
+
+| Command | Description |
+|---------|-------------|
+| `/snooze <IP> [minutes]` | Snooze alerts for an IP (default 60 min) |
+| `/unsnooze <IP>` | Remove snooze for an IP immediately |
+| `/status` | Show all monitored IPs and their last known condition |
+| `/list` | Show all currently snoozed IPs with remaining time |
+| `/help` | Show available commands |
+
+**Via CLI (on the server):**
+
+```bash
+python3 monitor.py --snooze 1.2.3.4 60    # snooze for 60 min
+python3 monitor.py --unsnooze 1.2.3.4     # remove snooze
+python3 monitor.py --status               # show current status
+```
+
+### Recovery Alerts
+
+When an IP transitions from non-OK → OK:
+- Sends a green ✅ recovery message to all chat IDs
+- Clears all snoozes for that IP
 
 ### Rate Limiting
 
@@ -179,8 +222,10 @@ IP-access-monitor/
     ├── __init__.py
     ├── checkhost_api.py   # check-host.net API client
     ├── nodes.py           # Node selection + caching (Iran + Germany priority)
-    ├── telegram.py        # Telegram alert sender
-    └── evaluator.py       # Result evaluation logic
+    ├── telegram.py        # Telegram alerts (multi-chat + inline ack buttons)
+    ├── evaluator.py       # Result evaluation logic
+    ├── snooze.py          # Snooze state management (persistent)
+    └── bot.py             # Telegram bot command + callback handler
 ```
 
 ## License

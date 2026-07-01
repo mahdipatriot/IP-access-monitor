@@ -16,6 +16,7 @@ build/
 
 # Runtime cache
 node_cache.json
+snooze_state.json
 
 # IDE
 .idea/

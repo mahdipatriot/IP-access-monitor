@@ -72,26 +72,39 @@ while true; do
     warn "Bot token cannot be empty."
 done
 
-# Telegram Chat ID
+# Telegram Chat IDs (comma-separated for multiple recipients)
+echo ""
+echo "Enter Telegram Chat IDs (comma-separated for multiple recipients)."
+echo "Get your Chat ID from @userinfobot on Telegram."
+echo "Example: 123456789  or  123456789,987654321"
+echo ""
 while true; do
-    read -rp "Enter your Telegram Chat ID: " CHAT_ID
+    read -rp "Enter your Telegram Chat ID(s): " CHAT_ID
     if [[ -n "$CHAT_ID" ]]; then
         break
     fi
     warn "Chat ID cannot be empty."
 done
 
-# Test Telegram connection
+# Test Telegram connection (send to each chat ID)
 info "Sending test message to Telegram..."
-TEST_RESPONSE=$(curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-    -H "Content-Type: application/json" \
-    -d "{\"chat_id\": \"${CHAT_ID}\", \"text\": \"✅ IP Access Monitor\\nTest message — alerts are configured correctly.\", \"parse_mode\": \"HTML\"}" 2>&1)
+ALL_TEST_OK=true
+IFS=',' read -ra CHAT_IDS <<< "$CHAT_ID"
+for cid in "${CHAT_IDS[@]}"; do
+    cid=$(echo "$cid" | xargs)  # trim whitespace
+    TEST_RESPONSE=$(curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+        -H "Content-Type: application/json" \
+        -d "{\"chat_id\": \"${cid}\", \"text\": \"✅ IP Access Monitor\\nTest message — alerts are configured correctly.\", \"parse_mode\": \"HTML\"}" 2>&1)
+    if echo "$TEST_RESPONSE" | grep -q '"ok":true'; then
+        ok "Test message sent to ${cid}"
+    else
+        warn "Test message failed for ${cid}: ${TEST_RESPONSE}"
+        ALL_TEST_OK=false
+    fi
+done
 
-if echo "$TEST_RESPONSE" | grep -q '"ok":true'; then
-    ok "Test message sent successfully!"
-else
-    warn "Test message failed. Response: $TEST_RESPONSE"
-    read -rp "Continue anyway? (y/N): " CONTINUE
+if [[ "$ALL_TEST_OK" == false ]]; then
+    read -rp "Some tests failed. Continue anyway? (y/N): " CONTINUE
     [[ "$CONTINUE" =~ ^[Yy]$ ]] || exit 1
 fi
 
