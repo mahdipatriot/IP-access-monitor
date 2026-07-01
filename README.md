@@ -1,6 +1,6 @@
-# Check-Host IP Monitor
+# IP Access Monitor
 
-A Python + Bash application that monitors a list of IPs using the [check-host.net](https://check-host.net) API and sends **Telegram alerts** when an IP is down globally or only accessible from Iran.
+Monitor IP reachability worldwide using the [check-host.net](https://check-host.net) API. Get instant **Telegram alerts** when your IPs go down or become Iran-only accessible. Python + systemd, with priority nodes for Iran and Germany.
 
 ## Features
 
@@ -19,8 +19,8 @@ A Python + Bash application that monitors a list of IPs using the [check-host.ne
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/yourusername/check-host-monitor.git
-cd check-host-monitor
+git clone https://github.com/yourusername/IP-access-monitor.git
+cd IP-access-monitor
 
 # 2. Run the installer
 chmod +x install.sh
@@ -56,6 +56,10 @@ nano ips.txt
 
 # 3. Install dependencies
 pip3 install -r requirements.txt
+# On newer Debian/Ubuntu (PEP 668), use:
+# pip3 install --break-system-packages -r requirements.txt
+# Or use system packages:
+# apt install python3-requests python3-dotenv
 
 # 4. Run
 python3 monitor.py
@@ -123,7 +127,7 @@ example.com
 | Condition | Criteria | Alert |
 |-----------|----------|-------|
 | 🔴 **DOWN** | 0 nodes have OK ping | Yes |
-| 🟡 **Iran-only** | Only priority (Iran) nodes OK, all global nodes fail | Yes |
+| 🟡 **Iran-only** | Only Iranian nodes OK, all others (incl. Germany) fail | Yes |
 | 🟠 **Degraded** | Some nodes OK but below threshold (<70%) | Yes |
 | ✅ **OK** | ≥70% of nodes have OK ping | No |
 
@@ -138,18 +142,18 @@ example.com
 
 ```bash
 # Status
-sudo systemctl status check-host-monitor
+sudo systemctl status ip-access-monitor
 
 # Stop / Start / Restart
-sudo systemctl stop check-host-monitor
-sudo systemctl start check-host-monitor
-sudo systemctl restart check-host-monitor
+sudo systemctl stop ip-access-monitor
+sudo systemctl start ip-access-monitor
+sudo systemctl restart ip-access-monitor
 
 # View logs (live)
-journalctl -u check-host-monitor -f
+journalctl -u ip-access-monitor -f
 
 # View last 100 lines
-journalctl -u check-host-monitor -n 100
+journalctl -u ip-access-monitor -n 100
 ```
 
 ## Single Check (no loop)
@@ -161,19 +165,20 @@ python3 monitor.py --once
 ## Project Structure
 
 ```
-check-host-monitor/
+IP-access-monitor/
 ├── README.md              # This file
-├── install.sh             # Interactive installer
+├── LICENSE                # MIT license
+├── install.sh             # Interactive installer (prompts, deps, systemd)
 ├── run.sh                 # Bash launcher (manual runs)
 ├── monitor.py             # Main Python script
-├── requirements.txt       # Python dependencies
+├── requirements.txt       # Python dependencies (requests, python-dotenv)
 ├── .env.example           # Environment variable template
-├── ips.txt                # IPs to monitor
+├── ips.txt                # IPs to monitor (one per line)
 ├── .gitignore
 └── src/
     ├── __init__.py
     ├── checkhost_api.py   # check-host.net API client
-    ├── nodes.py           # Node selection + caching
+    ├── nodes.py           # Node selection + caching (Iran + Germany priority)
     ├── telegram.py        # Telegram alert sender
     └── evaluator.py       # Result evaluation logic
 ```
