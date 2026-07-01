@@ -19,7 +19,7 @@ Monitor IP reachability worldwide using the [check-host.net](https://check-host.
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/yourusername/IP-access-monitor.git
+git clone https://github.com/mahdipatriot/IP-access-monitor.git
 cd IP-access-monitor
 
 # 2. Run the installer

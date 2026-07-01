@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# install.sh — Interactive installer for Check-Host IP Monitor
+# install.sh — Interactive installer for IP Access Monitor
 #
 # This script:
 #   1. Checks prerequisites (Python 3, pip, systemd)
@@ -59,7 +59,7 @@ ok "Python $PYTHON_VERSION detected"
 # ------------------------------------------------------------------ #
 echo ""
 echo "=========================================="
-echo "  Check-Host IP Monitor — Setup"
+echo "  IP Access Monitor — Setup"
 echo "=========================================="
 echo ""
 
@@ -85,7 +85,7 @@ done
 info "Sending test message to Telegram..."
 TEST_RESPONSE=$(curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
     -H "Content-Type: application/json" \
-    -d "{\"chat_id\": \"${CHAT_ID}\", \"text\": \"✅ Check-Host Monitor\\nTest message — alerts are configured correctly.\", \"parse_mode\": \"HTML\"}" 2>&1)
+    -d "{\"chat_id\": \"${CHAT_ID}\", \"text\": \"✅ IP Access Monitor\\nTest message — alerts are configured correctly.\", \"parse_mode\": \"HTML\"}" 2>&1)
 
 if echo "$TEST_RESPONSE" | grep -q '"ok":true'; then
     ok "Test message sent successfully!"
@@ -155,24 +155,31 @@ fi
 #  5. Install Python dependencies                                      #
 # ------------------------------------------------------------------ #
 info "Installing Python dependencies..."
+
+# Try normal pip install first, fall back to --break-system-packages for PEP 668
 if python3 -m pip install -r requirements.txt --quiet 2>&1; then
     ok "Dependencies installed"
+elif python3 -m pip install --break-system-packages -r requirements.txt --quiet 2>&1; then
+    ok "Dependencies installed (with --break-system-packages)"
 else
-    warn "pip install had issues — you may need to install manually: pip3 install -r requirements.txt"
+    error "Failed to install Python dependencies. Try manually:"
+    error "  python3 -m pip install -r requirements.txt"
+    error "  or: apt install python3-requests python3-dotenv"
+    exit 1
 fi
 
 # ------------------------------------------------------------------ #
 #  6. Create systemd service                                           #
 # ------------------------------------------------------------------ #
 if [[ "$HAS_SYSTEMD" == true ]]; then
-    SERVICE_NAME="check-host-monitor"
+    SERVICE_NAME="ip-access-monitor"
     SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
     info "Creating systemd service..."
 
     sudo tee "$SERVICE_FILE" > /dev/null <<EOF
 [Unit]
-Description=Check-Host IP Monitor
+Description=IP Access Monitor
 After=network-online.target
 Wants=network-online.target
 

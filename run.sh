@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# run.sh — Launch the Check-Host IP Monitor
+# run.sh — Launch the IP Access Monitor
 #
 # Loads .env and starts the Python monitor.  Useful for manual runs
 # or when not using the systemd service.

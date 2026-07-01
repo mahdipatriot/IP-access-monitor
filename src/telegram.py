@@ -48,7 +48,7 @@ class TelegramAlert:
 
     def test_connection(self) -> bool:
         """Send a test message to verify the bot token and chat ID."""
-        return self.send_message("✅ <b>Check-Host Monitor</b>\nTest message — alerts are configured correctly.")
+        return self.send_message("✅ <b>IP Access Monitor</b>\nTest message — alerts are configured correctly.")
 
     # ------------------------------------------------------------------ #
     #  Pre-formatted alert helpers                                        #

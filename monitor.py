@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check-Host IP Monitor
+"""IP Access Monitor
 
 Monitors a list of IPs via the check-host.net ping API and sends Telegram
 alerts when an IP is down globally or only accessible from Iran.
@@ -148,7 +148,7 @@ def run_cycle(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Check-Host IP Monitor")
+    parser = argparse.ArgumentParser(description="IP Access Monitor")
     parser.add_argument("--once", action="store_true", help="Run a single check cycle and exit")
     args = parser.parse_args()
 
